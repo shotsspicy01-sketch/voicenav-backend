@@ -2,7 +2,7 @@
   "name": "voicenav-semantic-backend",
   "version": "1.0.0",
   "private": true,
-  "description": "Tiny backend endpoint that gives VoiceNav LLM-based semantic page/section matching.",
+  "description": "Tiny backend endpoint that gives VoiceNav LLM-based semantic page/section matching and Whisper-based audio transcription.",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
@@ -10,6 +10,7 @@
   "dependencies": {
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
-    "express": "^4.19.2"
+    "express": "^4.19.2",
+    "multer": "^2.2.0"
   }
 }

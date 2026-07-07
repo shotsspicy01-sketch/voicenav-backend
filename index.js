@@ -31,6 +31,8 @@
 require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
+const multer = require("multer");
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } }); // 10MB cap, plenty for a short voice clip
 
 const app = express();
 app.use(cors({ origin: process.env.ALLOWED_ORIGIN || "*" }));
@@ -48,6 +50,10 @@ const API_URL = PROVIDER === "groq"
   ? "https://api.groq.com/openai/v1/chat/completions"
   : "https://api.openai.com/v1/chat/completions";
 const MODEL = process.env.VOICENAV_MODEL || (PROVIDER === "groq" ? "llama-3.3-70b-versatile" : "gpt-4o-mini");
+const TRANSCRIBE_URL = PROVIDER === "groq"
+  ? "https://api.groq.com/openai/v1/audio/transcriptions"
+  : "https://api.openai.com/v1/audio/transcriptions";
+const TRANSCRIBE_MODEL = process.env.VOICENAV_TRANSCRIBE_MODEL || (PROVIDER === "groq" ? "whisper-large-v3-turbo" : "whisper-1");
 
 const AGENT_SYSTEM_PROMPT =
   "You are the voice assistant for a website. You're given a short summary of the site, " +
@@ -69,14 +75,30 @@ const AGENT_SYSTEM_PROMPT =
   "not from what the candidates contain. Words like \"recommend\", \"suggest\", \"similar " +
   "to\", \"like X\", \"what should I\" signal an ANSWER even when a candidate's excerpt " +
   "happens to name the exact thing the visitor mentioned — in that case, use that excerpt as " +
-  "source material for your answer instead of navigating to it.\n\n" +
+  "source material for your answer instead of navigating to it. For example, given the " +
+  "request \"recommend something like Attack on Titan\" and a candidate excerpt that reads " +
+  "\"...Start with Fullmetal Alchemist: Brotherhood or Attack on Titan\", the correct action " +
+  "is \"answer\" (e.g. recommending Fullmetal Alchemist: Brotherhood from that excerpt), not " +
+  "\"navigate\" to the candidate that happens to mention Attack on Titan.\n\n" +
+  "CRITICAL GROUNDING RULE: only recommend or state a fact about something if that EXACT " +
+  "candidate's OWN excerpt actually supports it. Two specific things to never do: (a) never " +
+  "recommend a title just because its name appears inside a DIFFERENT, unrelated candidate's " +
+  "excerpt (e.g. a genre page that lists example titles) unless that excerpt itself actually " +
+  "addresses what the visitor asked about; (b) never combine facts from two separate " +
+  "candidates into one invented claim — e.g. if one candidate names a title and a different, " +
+  "unrelated candidate describes some attribute, do not present that title as having that " +
+  "attribute unless a SINGLE excerpt actually says so. If nothing you were given actually " +
+  "satisfies what the visitor specifically asked for, say you don't have that information on " +
+  "this site rather than forcing a plausible-sounding recommendation.\n\n" +
   "If you can't confidently do either, say so honestly rather than guessing.\n\n" +
   "You may also be given `heuristicGuess`: a candidate id a lightweight keyword/concept " +
   "matcher already picked for this exact request, with a confidence between 0 and 1. Treat it " +
   "as a strong, reliable prior for NAVIGATION — when it's present, use it as your answer " +
   "unless the visitor's own wording clearly signals they instead want an ANSWER (a " +
   "recommendation, explanation, or general question) rather than navigation, or clearly " +
-  "wants a different, more specific candidate than the one guessed.\n\n" +
+  "wants a different, more specific candidate than the one guessed. Don't second-guess a " +
+  "reasonable heuristicGuess just because some other candidate's excerpt happens to mention " +
+  "a word from the request.\n\n" +
   "Respond with ONLY a JSON object, exactly one of these three shapes, no other text, no " +
   "markdown fences:\n" +
   '{"action": "navigate", "matchId": "<id from the list>"}\n' +
@@ -182,7 +204,40 @@ app.post("/voicenav-match", async (req, res) => {
   }
 });
 
-app.get("/health", (_req, res) => res.json({ ok: true, provider: PROVIDER || "none configured", model: MODEL }));
+app.post("/voicenav-transcribe", upload.single("audio"), async (req, res) => {
+  try {
+    if (!PROVIDER) {
+      return res.status(500).json({ error: "No API key configured. Set GROQ_API_KEY (free) or OPENAI_API_KEY in .env." });
+    }
+    if (!req.file) {
+      return res.status(400).json({ error: "No audio file provided (expected a multipart field named 'audio')." });
+    }
+
+    const form = new FormData();
+    form.append("file", new Blob([req.file.buffer], { type: req.file.mimetype || "audio/webm" }), "recording.webm");
+    form.append("model", TRANSCRIBE_MODEL);
+
+    const response = await fetch(TRANSCRIBE_URL, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${API_KEY}` },
+      body: form,
+    });
+
+    if (!response.ok) {
+      const errText = await response.text();
+      console.error(`${PROVIDER} transcription error:`, response.status, errText);
+      return res.status(502).json({ error: "Transcription failed." });
+    }
+
+    const data = await response.json();
+    res.json({ text: (data.text || "").trim() });
+  } catch (err) {
+    console.error("VoiceNav transcription error:", err);
+    res.status(500).json({ error: "Transcription failed." });
+  }
+});
+
+app.get("/health", (_req, res) => res.json({ ok: true, provider: PROVIDER || "none configured", model: MODEL, transcribeModel: TRANSCRIBE_MODEL }));
 
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
